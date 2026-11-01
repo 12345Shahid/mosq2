@@ -18,7 +18,7 @@ function getQueryParam(name) {
   return null;
 }
 
-const sessionId = getQueryParam('session') || 'myo-youth';
+let sessionId = getQueryParam('session') || 'myo-youth';
 let currentLanguage = getQueryParam('lang') || 'en';
 let currentMosqueName = 'Live Sermon';
 
@@ -277,24 +277,26 @@ if ('speechSynthesis' in window) {
 }
 
 function hasVoiceForLang(langCode) {
+  if (!('speechSynthesis' in window)) return false;
   if (!cachedVoices.length) loadVoices();
-  const targetPrefix = (langCode || 'en').toLowerCase().split('-')[0];
-  return cachedVoices.some(v => (v.lang || '').toLowerCase().replace('_', '-').startsWith(targetPrefix));
+  // Always permit synthesis attempt; modern mobile browsers route BCP-47 to online synthesis
+  return true;
 }
 
 function getBestVoice(langCode) {
   if (!cachedVoices.length) loadVoices();
   const targetPrefix = (langCode || 'en').toLowerCase().split('-')[0];
   const matching = cachedVoices.filter(v => (v.lang || '').toLowerCase().replace('_', '-').startsWith(targetPrefix));
-  if (!matching.length) return null; // Avoid returning unrelated language voice
-
-  for (const voice of matching) {
-    const nameLower = voice.name.toLowerCase();
-    const isMale = MALE_VOICE_KEYWORDS.some(kw => nameLower.includes(kw));
-    const isFemale = FEMALE_VOICE_KEYWORDS.some(kw => nameLower.includes(kw));
-    if (isMale && !isFemale) return voice;
+  if (matching.length > 0) {
+    for (const voice of matching) {
+      const nameLower = voice.name.toLowerCase();
+      const isMale = MALE_VOICE_KEYWORDS.some(kw => nameLower.includes(kw));
+      const isFemale = FEMALE_VOICE_KEYWORDS.some(kw => nameLower.includes(kw));
+      if (isMale && !isFemale) return voice;
+    }
+    return matching[0];
   }
-  return matching[0] || null;
+  return null;
 }
 
 function startBluetoothKeepAlive() {
@@ -715,6 +717,15 @@ function connectWebSocket() {
     try {
       lastWsMessageAt = Date.now();
       const data = JSON.parse(event.data);
+      if (data.type === 'JOINED_SUCCESS') {
+        if (data.sessionId) sessionId = data.sessionId;
+        if (data.session && data.session.mosqueName) {
+          updateMobileStatus(data.session.status, data.session.mosqueName);
+        }
+      }
+      if (data.type === 'LANGUAGE_CHANGED') {
+        if (data.sessionId) sessionId = data.sessionId;
+      }
       if (data.type === 'SESSION_STATUS') {
         updateMobileStatus(data.status, data.mosqueName);
       }
@@ -820,9 +831,25 @@ document.querySelectorAll('#step2-lang-grid .lang-card-item').forEach(card => {
 if (btnConfirmLang) {
   btnConfirmLang.addEventListener('click', () => {
     currentLanguage = tempSelectedLang;
+    liveText = '';
     updateLangDisplay();
     showStep(3);
     initLiveSession();
+    if (ws && ws.readyState === WebSocket.OPEN) {
+      ws.send(JSON.stringify({
+        type: 'JOIN_ROOM',
+        sessionId,
+        role: 'attendee',
+        language: currentLanguage,
+        clientId: myClientId,
+        deviceType: myDeviceType
+      }));
+      ws.send(JSON.stringify({
+        type: 'CHANGE_LANGUAGE',
+        sessionId,
+        language: currentLanguage
+      }));
+    }
   });
 }
 
@@ -845,6 +872,7 @@ function renderModalLangs() {
     `;
     card.addEventListener('click', () => {
       currentLanguage = l.code;
+      liveText = '';
       updateLangDisplay();
       closeLangModal();
 
@@ -854,7 +882,9 @@ function renderModalLangs() {
           type: 'JOIN_ROOM',
           sessionId,
           role: 'attendee',
-          language: currentLanguage
+          language: currentLanguage,
+          clientId: myClientId,
+          deviceType: myDeviceType
         }));
         ws.send(JSON.stringify({
           type: 'CHANGE_LANGUAGE',

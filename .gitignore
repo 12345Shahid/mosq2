@@ -6,3 +6,4 @@ node_modules
 *.log
 opencode.json
 replicate-auditor/
+chatbot/sessions/

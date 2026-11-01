@@ -1,6 +1,6 @@
 {
   "name": "mosq-live-khutbah-translation",
-  "version": "1.0.0",
+  "version": "2.0.0",
   "description": "Live Khutbah Real-Time Translation, Quran Detection, TV Display, and Earbud Audio Streaming",
   "main": "server/index.js",
   "type": "commonjs",

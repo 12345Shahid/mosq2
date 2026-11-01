@@ -28,6 +28,11 @@ app.use(cors());
 app.use(express.json());
 app.use(express.static(path.join(__dirname, '../public')));
 
+// Smart TV friendly vanity routes
+app.get(['/tv', '/display'], (req, res) => {
+  res.sendFile(path.join(__dirname, '../public/display.html'));
+});
+
 // Core Singletons
 const sessionManager = new SessionManager();
 const openrouterKey = process.env.OPENROUTER_API_KEY || process.env.GROQ_API_KEY;
@@ -159,7 +164,6 @@ sttService.on('translation', async (data) => {
   const { arabic, translations, sessionLabel } = data;
   if (!arabic && (!translations || Object.keys(translations).length === 0)) return;
 
-  const targetSessionId = activeLiveSessionId;
   const session = sessionManager.getSession(targetSessionId);
   if (!session) return;
 
@@ -193,6 +197,31 @@ sttService.on('translation', async (data) => {
 });
 
 // ---------------------------------------------------------------------------
+// Helper to get active or most recent session for TV auto-discovery
+function getActiveOrLatestSession() {
+  const allSessions = sessionManager.getAllActiveSessions();
+  // 1. Look for any active session
+  const liveSession = allSessions.find(s => s.status === 'active');
+  if (liveSession) return liveSession;
+
+  // 2. Look for session matching activeLiveSessionId
+  if (activeLiveSessionId) {
+    const tracked = sessionManager.getSession(activeLiveSessionId);
+    if (tracked) return tracked;
+  }
+
+  // 3. Look for paused session
+  const pausedSession = allSessions.find(s => s.status === 'paused');
+  if (pausedSession) return pausedSession;
+
+  // 4. Return the most recently updated or created session
+  if (allSessions.length > 0) {
+    return allSessions[allSessions.length - 1];
+  }
+
+  return null;
+}
+
 // Soniox Dynamic Language Gates Integration
 // ---------------------------------------------------------------------------
 // Helper to get all active session IDs (with activeLiveSessionId fallback)
@@ -208,18 +237,74 @@ function getTargetSessionIds() {
 }
 
 // Synchronize open Soniox language gates when attendee/TV language selection changes in a room
+// STRICT COST CONTROL: Only open gates if the Khutbah session is currently active ($0 idle cost)
+if (sonioxService.isConfigured()) {
+  sonioxService.setSessionValidator((sessionId) => {
+    const session = sessionManager.getSession(sessionId);
+    return Boolean(session && session.status === 'active');
+  });
+}
+
+// Dynamic session tracking & lifecycle handlers
+sessionManager.on('session_started', ({ sessionId }) => {
+  if (sessionId) {
+    activeLiveSessionId = sessionId;
+    console.log(`[Lifecycle] Session "${sessionId}" started — dynamic active live session set to "${sessionId}".`);
+  }
+});
+
+// Ensure Soniox gates close instantly whenever a session changes lifecycle state
+sessionManager.on('session_paused', ({ sessionId }) => {
+  if (sonioxService.isConfigured() && sessionId) {
+    console.log(`[Lifecycle] Session "${sessionId}" paused — immediately closing Soniox gates ($0 cost).`);
+    sonioxService.closeSessionGates(sessionId);
+  }
+});
+
+sessionManager.on('session_ended', ({ sessionId }) => {
+  if (sonioxService.isConfigured() && sessionId) {
+    console.log(`[Lifecycle] Session "${sessionId}" ended — immediately closing Soniox gates ($0 cost).`);
+    sonioxService.closeSessionGates(sessionId);
+  }
+});
+
+sessionManager.on('session_deleted', ({ sessionId }) => {
+  if (sonioxService.isConfigured() && sessionId) {
+    console.log(`[Lifecycle] Session "${sessionId}" deleted — immediately closing Soniox gates ($0 cost).`);
+    sonioxService.closeSessionGates(sessionId);
+  }
+  if (activeLiveSessionId === sessionId) {
+    const nextSession = getActiveOrLatestSession();
+    activeLiveSessionId = nextSession ? nextSession.id : null;
+  }
+});
+
 sessionManager.on('languages_updated', ({ sessionId, languages }) => {
   if (sonioxService.isConfigured() && sessionId) {
-    sonioxService.syncGates(sessionId, languages);
+    const session = sessionManager.getSession(sessionId);
+    if (session && session.status === 'active') {
+      sonioxService.syncGates(sessionId, languages);
+    }
   }
 });
 
 // Re-synchronize gates when incoming audio resumes after pause/silence
+sessionManager.on('session_needs_sync', (sessionId) => {
+  if (sonioxService.isConfigured() && sessionId) {
+    const session = sessionManager.getSession(sessionId);
+    if (session && session.status === 'active') {
+      const requiredLangs = sessionManager.getRequiredLanguages(sessionId);
+      sonioxService.syncGates(sessionId, requiredLangs);
+    }
+  }
+});
+
 sonioxService.on('session_needs_sync', (sessionId) => {
   if (sonioxService.isConfigured() && sessionId) {
     const session = sessionManager.getSession(sessionId);
-    if (session && session.activatedLanguages) {
-      sonioxService.syncGates(sessionId, session.activatedLanguages);
+    if (session && session.status === 'active') {
+      const requiredLangs = sessionManager.getRequiredLanguages(sessionId);
+      sonioxService.syncGates(sessionId, requiredLangs);
     }
   }
 });
@@ -481,23 +566,31 @@ app.get('/api/status', (req, res) => {
   });
 });
 
-// Get or initialize active session
+// Get or initialize active session (TV zero-config auto-discovery)
 app.get('/api/session/current', async (req, res) => {
   const protocol = req.headers['x-forwarded-proto'] || req.protocol;
   const hostUrl = `${protocol}://${req.get('host')}`;
-  let session = sessionManager.getSession(activeLiveSessionId);
+  let session = getActiveOrLatestSession();
   if (!session) {
+    const sid = activeLiveSessionId || 'jumuah-live-4b2c1d';
     session = await sessionManager.createSession({
-      sessionId: activeLiveSessionId,
+      sessionId: sid,
       mosqueName: process.env.DEFAULT_MASJID_NAME || 'Masjid Al-Noor',
       primaryLanguage: process.env.DEFAULT_PRIMARY_LANGUAGE || 'en',
       hostUrl
     });
+    activeLiveSessionId = session.id;
   } else {
-    session = await sessionManager.updateHostUrl(activeLiveSessionId, hostUrl);
+    session = await sessionManager.updateHostUrl(session.id, hostUrl);
   }
-  const stats = sessionManager.getSessionStats(activeLiveSessionId);
-  res.json({ ...session, stats });
+  const stats = sessionManager.getSessionStats(session.id);
+  const isLive = session.status === 'active';
+  res.json({
+    ...session,
+    sessionId: session.id,
+    isLive,
+    stats
+  });
 });
 
 // Get specific session
@@ -573,6 +666,10 @@ app.post('/api/session/:id/start', (req, res) => {
   }
   const session = sessionManager.startSession(req.params.id);
   if (!session) return res.status(404).json({ error: 'Session not found' });
+  if (sonioxService.isConfigured()) {
+    const requiredLangs = sessionManager.getRequiredLanguages(session.id);
+    sonioxService.syncGates(session.id, requiredLangs);
+  }
   res.json(session);
 });
 
@@ -588,6 +685,10 @@ app.post('/api/session/:id/resume', (req, res) => {
   }
   const session = sessionManager.startSession(req.params.id);
   if (!session) return res.status(404).json({ error: 'Session not found' });
+  if (sonioxService.isConfigured()) {
+    const requiredLangs = sessionManager.getRequiredLanguages(session.id);
+    sonioxService.syncGates(session.id, requiredLangs);
+  }
   res.json(session);
 });
 
@@ -619,14 +720,28 @@ app.post('/api/session/:id/clear', (req, res) => {
   res.json({ success: true, message: 'Screen text cleared for session' });
 });
 
+// Microphone stopped / disabled endpoint
+app.post('/api/session/:id/mic-off', (req, res) => {
+  if (sonioxService.isConfigured()) {
+    sonioxService.onMicrophoneOff(req.params.id);
+  }
+  res.json({ success: true, message: 'Microphone turned off and Soniox gates shut' });
+});
+
 // Delete Session
 app.delete('/api/session/:id', (req, res) => {
+  if (sonioxService.isConfigured()) {
+    sonioxService.closeSessionGates(req.params.id);
+  }
   const success = sessionManager.deleteSession(req.params.id);
   if (!success) return res.status(404).json({ error: 'Session not found' });
   res.json({ success: true, message: 'Session deleted successfully' });
 });
 
 app.post('/api/session/:id/delete', (req, res) => {
+  if (sonioxService.isConfigured()) {
+    sonioxService.closeSessionGates(req.params.id);
+  }
   const success = sessionManager.deleteSession(req.params.id);
   if (!success) return res.status(404).json({ error: 'Session not found' });
   res.json({ success: true, message: 'Session deleted successfully' });
@@ -730,25 +845,36 @@ app.delete('/api/history/:id', (req, res) => {
   res.json({ success });
 });
 
-// Live resilient polling feed endpoint
-app.get('/api/session/:id/feed', (req, res) => {
-  const session = sessionManager.getSession(req.params.id);
-  if (!session) return res.status(404).json({ error: 'Session not found' });
-
+// Helper to format feed responses with delta sequence support and full TV settings
+function sendSessionFeed(session, req, res) {
   const since = req.query.since;
-  let transcripts = session.transcripts;
-  if (since) {
+  const sinceSeq = req.query.since_seq !== undefined ? Number(req.query.since_seq) : null;
+  let transcripts = session.transcripts || [];
+
+  if (sinceSeq !== null && !isNaN(sinceSeq)) {
+    transcripts = transcripts.filter(t => (t.seq || 0) > sinceSeq);
+  } else if (since) {
     const sinceDate = new Date(since).getTime();
     if (!isNaN(sinceDate)) {
       transcripts = transcripts.filter(t => new Date(t.timestamp).getTime() > sinceDate);
     }
   }
-  const stats = sessionManager.getSessionStats(req.params.id);
+
+  const stats = sessionManager.getSessionStats(session.id);
+  const isLive = session.status === 'active';
 
   res.json({
+    sessionId: session.id,
     status: session.status,
+    isLive,
+    mosqueName: session.mosqueName,
+    tvLanguage: session.tvLanguage || session.primaryLanguage || 'en',
+    tvScreenMode: session.tvScreenMode || 'split',
+    sourceLanguage: session.sourceLanguage || 'auto',
     startedAt: session.startedAt,
-    latestAyah: session.detectedAyahs.length > 0 ? session.detectedAyahs[session.detectedAyahs.length - 1] : null,
+    latestAyah: session.detectedAyahs && session.detectedAyahs.length > 0
+      ? session.detectedAyahs[session.detectedAyahs.length - 1]
+      : null,
     tvFontSize: session.tvFontSize,
     tvCapacity: session.tvCapacity,
     tvAudioEnabled: session.tvAudioEnabled,
@@ -757,6 +883,20 @@ app.get('/api/session/:id/feed', (req, res) => {
     stats,
     serverTime: new Date().toISOString()
   });
+}
+
+// Live resilient polling feed endpoint for active session (TV zero-config auto-discovery)
+app.get('/api/session/current/feed', (req, res) => {
+  const session = getActiveOrLatestSession();
+  if (!session) return res.status(404).json({ error: 'No active session found' });
+  sendSessionFeed(session, req, res);
+});
+
+// Live resilient polling feed endpoint for specific session
+app.get('/api/session/:id/feed', (req, res) => {
+  const session = sessionManager.getSession(req.params.id);
+  if (!session) return res.status(404).json({ error: 'Session not found' });
+  sendSessionFeed(session, req, res);
 });
 
 // Retroactive history backfill endpoint for newly selected languages
@@ -802,8 +942,13 @@ wss.on('connection', (ws, req) => {
       if (urlRole) userRole = urlRole;
       if (urlLang) userLanguage = urlLang;
       if (urlSession) {
-        const resolved = sessionManager.getSession(urlSession);
-        userSessionId = resolved ? resolved.id : urlSession;
+        if (urlSession === 'current') {
+          const current = getActiveOrLatestSession();
+          userSessionId = current ? current.id : activeLiveSessionId;
+        } else {
+          const resolved = sessionManager.getSession(urlSession);
+          userSessionId = resolved ? resolved.id : urlSession;
+        }
       }
     } catch (_) {}
   }
@@ -815,12 +960,17 @@ wss.on('connection', (ws, req) => {
         if (Buffer.isBuffer(raw) && raw.length >= 2) {
           const pcm = raw.length % 2 === 0 ? raw : raw.subarray(0, raw.length - 1);
           if (pcm.length >= 2) {
-            // STRICT SESSION ISOLATION: Drop binary audio if socket has no bound sessionId
+            // STRICT SESSION ISOLATION & BILLING PROTECTION:
+            // Drop binary audio if socket has no bound sessionId or if session is not actively started ($0 idle cost)
             if (!userSessionId) {
               return;
             }
+            const session = sessionManager.getSession(userSessionId);
+            if (!session || session.status !== 'active') {
+              return;
+            }
             if (sonioxService.isConfigured()) {
-              sonioxService.broadcastAudio(pcm, userSessionId);
+              sonioxService.broadcastAudio(pcm, session.id);
             } else {
               sttService.sendAudioChunk(pcm);
             }
@@ -832,7 +982,11 @@ wss.on('connection', (ws, req) => {
       const msg = JSON.parse(raw.toString());
 
       if (msg.type === 'JOIN_ROOM') {
-        const requestedSessionId = msg.sessionId || userSessionId;
+        let requestedSessionId = msg.sessionId || userSessionId;
+        if (!requestedSessionId || requestedSessionId === 'current') {
+          const current = getActiveOrLatestSession();
+          requestedSessionId = current ? current.id : activeLiveSessionId;
+        }
         if (!requestedSessionId) {
           console.warn('[WS] JOIN_ROOM received without sessionId; ignoring.');
           return;
@@ -882,10 +1036,18 @@ wss.on('connection', (ws, req) => {
 
       if (msg.type === 'CHANGE_LANGUAGE') {
         userLanguage = msg.language || 'en';
-        const targetSid = msg.sessionId || userSessionId;
+        const rawSid = msg.sessionId || userSessionId;
+        const targetSid = sessionManager.getCanonicalId(rawSid) || rawSid;
         if (targetSid) {
+          userSessionId = targetSid;
           sessionManager.updateSubscriberLanguage(targetSid, ws, userLanguage);
           sessionManager.activateLanguage(targetSid, userLanguage);
+          ws.send(JSON.stringify({
+            type: 'LANGUAGE_CHANGED',
+            sessionId: targetSid,
+            language: userLanguage,
+            stats: sessionManager.getSessionStats(targetSid)
+          }));
         }
       }
 
@@ -935,14 +1097,25 @@ wss.on('connection', (ws, req) => {
         sessionManager.clearSessionText(targetSessionId);
       }
 
+      if (msg.type === 'MIC_OFF') {
+        const targetSessionId = msg.sessionId || userSessionId;
+        if (sonioxService.isConfigured() && targetSessionId) {
+          sonioxService.onMicrophoneOff(targetSessionId);
+        }
+      }
+
       if (msg.type === 'AUDIO_DATA') {
         // Base64 audio chunk from browser WebRTC/MediaRecorder
         if (msg.base64Audio) {
-          const audioBuffer = Buffer.from(msg.base64Audio, 'base64');
           const sid = msg.sessionId || userSessionId;
-          if (sid && sonioxService.isConfigured()) {
-            sonioxService.broadcastAudio(audioBuffer, sid);
-          } else if (sid) {
+          const session = sid ? sessionManager.getSession(sid) : null;
+          if (!session || session.status !== 'active') {
+            return;
+          }
+          const audioBuffer = Buffer.from(msg.base64Audio, 'base64');
+          if (sonioxService.isConfigured()) {
+            sonioxService.broadcastAudio(audioBuffer, session.id);
+          } else {
             sttService.sendAudioChunk(audioBuffer);
           }
         }

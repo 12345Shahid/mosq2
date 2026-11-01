@@ -46,33 +46,31 @@ async function runSonioxGateTests() {
   assert(sonioxService.activeGates.has('session-a:bn'), 'session-a:bn gate should be open');
   console.log('  ✔ Opened gates for session-a ["en", "bn"].');
 
-  // Open gates for Session B (Parallel session on second laptop)
+  // Test 4: Strict Audio Routing & VAD Energy Check
+  console.log('\n[Test 4] Testing strict audio routing & VAD energy check...');
+  const voiceChunkA = Buffer.alloc(3200); // 100ms of audio from Laptop A with real voice energy
+  for (let i = 0; i < voiceChunkA.length; i += 2) {
+    voiceChunkA.writeInt16LE(2000, i); // RMS = 2000 > 150 threshold
+  }
+  const silenceChunk = Buffer.alloc(3200); // 100ms of pure silence (0 amplitude)
+
+  // Send voice audio -> session-a gates should receive it
+  sonioxService.broadcastAudio(voiceChunkA, 'session-a');
+  assert.strictEqual(sonioxService.activeGates.get('session-a:en').lastSent, voiceChunkA, 'session-a:en received Laptop A audio');
+  assert.strictEqual(sonioxService.activeGates.get('session-a:bn').lastSent, voiceChunkA, 'session-a:bn received Laptop A audio');
+  console.log('  ✔ Audio from Laptop A routed exclusively to session-a.');
+
+  // Test Concurrency Protection: Starting Session B closes Session A gates
+  console.log('\n[Test 4b] Testing concurrency protection: starting session-b closes session-a gates...');
   sonioxService.syncGates('session-b', ['en', 'tr']);
-  assert.strictEqual(sonioxService.activeGates.size, 4, 'Should have 4 total open gates (2 for A, 2 for B)');
-  assert(sonioxService.activeGates.has('session-b:en'), 'session-b:en gate should be open');
-  assert(sonioxService.activeGates.has('session-b:tr'), 'session-b:tr gate should be open');
-  console.log('  ✔ Opened gates for session-b ["en", "tr"] in parallel.');
+  assert.strictEqual(sonioxService.activeGates.has('session-a:en'), false, 'session-a:en gate should be closed');
+  assert.strictEqual(sonioxService.activeGates.has('session-a:bn'), false, 'session-a:bn gate should be closed');
+  assert.strictEqual(sonioxService.activeGates.has('session-b:en'), true, 'session-b:en gate should be open');
+  assert.strictEqual(sonioxService.activeGates.has('session-b:tr'), true, 'session-b:tr gate should be open');
+  console.log('  ✔ Concurrency protection safely closed stale session-a gates when session-b began.');
 
-  // Test 4: Strict Audio Isolation (Zero Cross-Talk)
-  console.log('\n[Test 4] Testing strict audio isolation between sessions...');
-  const audioChunkA = Buffer.alloc(3200); // 100ms of audio from Laptop A
-  audioChunkA.fill(0xAA);
-  const audioChunkB = Buffer.alloc(3200); // 100ms of audio from Laptop B
-  audioChunkB.fill(0xBB);
-
-  // Send Laptop A audio -> ONLY session-a gates should receive it!
-  sonioxService.broadcastAudio(audioChunkA, 'session-a');
-  assert.strictEqual(sonioxService.activeGates.get('session-a:en').lastSent, audioChunkA, 'session-a:en received Laptop A audio');
-  assert.strictEqual(sonioxService.activeGates.get('session-a:bn').lastSent, audioChunkA, 'session-a:bn received Laptop A audio');
-  assert.strictEqual(sonioxService.activeGates.get('session-b:en').lastSent, undefined, 'session-b:en MUST NOT receive Laptop A audio');
-  assert.strictEqual(sonioxService.activeGates.get('session-b:tr').lastSent, undefined, 'session-b:tr MUST NOT receive Laptop A audio');
-  console.log('  ✔ Audio from Laptop A routed exclusively to session-a (0 cross-talk).');
-
-  // Send Laptop B audio -> ONLY session-b gates should receive it!
-  sonioxService.broadcastAudio(audioChunkB, 'session-b');
-  assert.strictEqual(sonioxService.activeGates.get('session-b:en').lastSent, audioChunkB, 'session-b:en received Laptop B audio');
-  assert.strictEqual(sonioxService.activeGates.get('session-b:tr').lastSent, audioChunkB, 'session-b:tr received Laptop B audio');
-  console.log('  ✔ Audio from Laptop B routed exclusively to session-b (0 cross-talk).');
+  // Switch back to session-a for remaining tests
+  sonioxService.syncGates('session-a', ['en', 'bn']);
 
   // Test 5: Token stream parsing with Session ID
   console.log('\n[Test 5] Testing Soniox per-token streaming emission with Session ID...');
@@ -119,8 +117,9 @@ async function runSonioxGateTests() {
   console.log('\n[Test 6] Testing session gate cleanup isolation...');
   sonioxService.closeSessionGates('session-a');
   assert.strictEqual(sonioxService.activeGates.has('session-a:en'), false, 'session-a gates should be closed');
-  assert.strictEqual(sonioxService.activeGates.has('session-b:en'), true, 'session-b gates MUST remain open');
-  console.log('  ✔ Closing session-a gates left session-b completely intact and active.');
+  assert.strictEqual(sonioxService.activeGates.has('session-a:bn'), false, 'session-a:bn gate should be closed');
+  assert.strictEqual(sonioxService.activeGates.size, 0, 'No active gates remaining');
+  console.log('  ✔ Closing session-a gates cleared all active gates ($0 cost).');
 
   // Clean up
   sonioxService.removeAllListeners('token_stream');

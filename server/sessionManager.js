@@ -111,6 +111,13 @@ class SessionManager extends EventEmitter {
     return null;
   }
 
+  getCanonicalId(sessionId) {
+    if (!sessionId) return null;
+    const session = this.getSession(sessionId);
+    return session ? session.id : sessionId;
+  }
+
+
   async updateHostUrl(sessionId, hostUrl) {
     const session = this.getSession(sessionId);
     if (!session || !hostUrl) return session;
@@ -201,6 +208,8 @@ class SessionManager extends EventEmitter {
     this.history = this.history.filter(h => h.sessionId !== actualId && h.id !== actualId);
     this.saveHistory();
 
+    this.emit('session_deleted', { sessionId: actualId });
+
     return true;
   }
 
@@ -236,6 +245,7 @@ class SessionManager extends EventEmitter {
       mosqueName: session.mosqueName,
       startedAt: session.startedAt
     });
+    this.emit('session_started', { sessionId: session.id });
     return session;
   }
 
@@ -248,6 +258,7 @@ class SessionManager extends EventEmitter {
       status: 'paused',
       mosqueName: session.mosqueName
     });
+    this.emit('session_paused', { sessionId: session.id });
     return session;
   }
 
@@ -269,6 +280,7 @@ class SessionManager extends EventEmitter {
       summary: archiveRecord
     });
 
+    this.emit('session_ended', { sessionId: session.id });
     return session;
   }
 
@@ -398,30 +410,51 @@ class SessionManager extends EventEmitter {
    * Adds a WebSocket connection to the session room
    */
   addSubscriber(sessionId, ws, { role = 'attendee', language = 'en', clientId = '', deviceType = null } = {}) {
-    if (!this.subscribers.has(sessionId)) {
-      this.subscribers.set(sessionId, new Set());
+    const actualId = this.getCanonicalId(sessionId);
+    if (!this.subscribers.has(actualId)) {
+      this.subscribers.set(actualId, new Set());
     }
+    const subs = this.subscribers.get(actualId);
     const resolvedDevice = deviceType || (role === 'tv' ? 'computer' : 'phone');
-    const subscriber = { ws, role, language, clientId, deviceType: resolvedDevice, lastPing: Date.now() };
-    this.subscribers.get(sessionId).add(subscriber);
+
+    // In-place update if this socket connection is already registered
+    let subscriber = null;
+    for (const sub of subs) {
+      if (sub.ws === ws) {
+        subscriber = sub;
+        break;
+      }
+    }
+
+    if (subscriber) {
+      subscriber.role = role;
+      subscriber.language = language;
+      if (clientId) subscriber.clientId = clientId;
+      subscriber.deviceType = resolvedDevice;
+      subscriber.lastPing = Date.now();
+    } else {
+      subscriber = { ws, role, language, clientId, deviceType: resolvedDevice, lastPing: Date.now() };
+      subs.add(subscriber);
+    }
 
     if (role === 'tv' && language) {
-      const session = this.getSession(sessionId);
+      const session = this.getSession(actualId);
       if (session && !session.tvLanguage) session.tvLanguage = language;
     }
 
     if (language && role !== 'admin') {
-      this.activateLanguage(sessionId, language);
+      this.activateLanguage(actualId, language);
     }
 
     // Update attendee counts
-    this.notifyStatsUpdate(sessionId);
+    this.notifyStatsUpdate(actualId);
 
     return subscriber;
   }
 
   touchSubscriber(sessionId, ws, { deviceType = null, language = null, clientId = null } = {}) {
-    const subs = this.subscribers.get(sessionId);
+    const actualId = this.getCanonicalId(sessionId);
+    const subs = this.subscribers.get(actualId);
     if (!subs) return;
     for (const sub of subs) {
       if (sub.ws === ws) {
@@ -430,7 +463,7 @@ class SessionManager extends EventEmitter {
         if (language) {
           sub.language = language;
           if (sub.role !== 'admin') {
-            this.activateLanguage(sessionId, language);
+            this.activateLanguage(actualId, language);
           }
         }
         if (clientId) sub.clientId = clientId;
@@ -440,11 +473,12 @@ class SessionManager extends EventEmitter {
   }
 
   recordHttpPing(sessionId, { clientId, role = 'attendee', deviceType = 'phone', language = 'en' }) {
+    const actualId = this.getCanonicalId(sessionId);
     if (!this.httpClients) this.httpClients = new Map();
-    if (!this.httpClients.has(sessionId)) {
-      this.httpClients.set(sessionId, new Map());
+    if (!this.httpClients.has(actualId)) {
+      this.httpClients.set(actualId, new Map());
     }
-    const sessionMap = this.httpClients.get(sessionId);
+    const sessionMap = this.httpClients.get(actualId);
     sessionMap.set(clientId, {
       role,
       deviceType: deviceType || 'phone',
@@ -452,18 +486,19 @@ class SessionManager extends EventEmitter {
       lastSeen: Date.now()
     });
     if (role === 'tv' && language) {
-      const session = this.getSession(sessionId);
+      const session = this.getSession(actualId);
       if (session && !session.tvLanguage) session.tvLanguage = language;
     }
     if (language && role !== 'admin') {
-      this.activateLanguage(sessionId, language);
+      this.activateLanguage(actualId, language);
     }
-    this.notifyStatsUpdate(sessionId);
+    this.notifyStatsUpdate(actualId);
   }
 
   getActiveHttpClients(sessionId) {
-    if (!this.httpClients || !this.httpClients.has(sessionId)) return new Map();
-    const sessionMap = this.httpClients.get(sessionId);
+    const actualId = this.getCanonicalId(sessionId);
+    if (!this.httpClients || !this.httpClients.has(actualId)) return new Map();
+    const sessionMap = this.httpClients.get(actualId);
     const now = Date.now();
     const active = new Map();
     for (const [cid, info] of sessionMap.entries()) {
@@ -477,7 +512,8 @@ class SessionManager extends EventEmitter {
   }
 
   removeSubscriber(sessionId, ws) {
-    const subs = this.subscribers.get(sessionId);
+    const actualId = this.getCanonicalId(sessionId);
+    const subs = this.subscribers.get(actualId);
     if (!subs) return;
 
     for (const sub of subs) {
@@ -487,26 +523,28 @@ class SessionManager extends EventEmitter {
       }
     }
 
-    this.notifyStatsUpdate(sessionId);
+    this.notifyStatsUpdate(actualId);
   }
 
   updateSubscriberLanguage(sessionId, ws, newLanguage) {
-    const subs = this.subscribers.get(sessionId);
+    const actualId = this.getCanonicalId(sessionId);
+    const subs = this.subscribers.get(actualId);
     if (!subs) return;
     for (const sub of subs) {
       if (sub.ws === ws) {
         sub.language = newLanguage;
         if (sub.role !== 'admin') {
-          this.activateLanguage(sessionId, newLanguage);
+          this.activateLanguage(actualId, newLanguage);
         }
         break;
       }
     }
-    this.notifyStatsUpdate(sessionId);
+    this.notifyStatsUpdate(actualId);
   }
 
   getSessionStats(sessionId) {
-    const subs = this.subscribers.get(sessionId) || new Set();
+    const actualId = this.getCanonicalId(sessionId);
+    const subs = this.subscribers.get(actualId) || new Set();
     let phoneAttendees = 0;
     let computerDisplays = 0;
     let totalAttendees = 0;
@@ -540,7 +578,7 @@ class SessionManager extends EventEmitter {
     }
 
     // Also factor in any HTTP-polling clients not connected to WebSocket
-    const activeHttp = this.getActiveHttpClients(sessionId);
+    const activeHttp = this.getActiveHttpClients(actualId);
     for (const [cid, info] of activeHttp.entries()) {
       if (info.role === 'admin') continue;
       if (seenClientKeys.has(cid)) continue;
@@ -578,7 +616,8 @@ class SessionManager extends EventEmitter {
    * (Display TV target language + all sticky activated languages + connected attendee languages)
    */
   getRequiredLanguages(sessionId) {
-    const session = this.getSession(sessionId);
+    const actualId = this.getCanonicalId(sessionId);
+    const session = this.getSession(actualId);
     const languages = new Set();
     if (session) {
       const tvLang = session.tvLanguage || session.primaryLanguage || 'en';
@@ -592,14 +631,14 @@ class SessionManager extends EventEmitter {
       languages.add('en');
     }
 
-    const subs = this.subscribers.get(sessionId) || new Set();
+    const subs = this.subscribers.get(actualId) || new Set();
     for (const sub of subs) {
       if (sub.role !== 'admin' && sub.language) {
         languages.add(sub.language);
       }
     }
 
-    const activeHttp = this.getActiveHttpClients(sessionId);
+    const activeHttp = this.getActiveHttpClients(actualId);
     for (const [_, info] of activeHttp.entries()) {
       if (info.role !== 'admin' && info.language) {
         languages.add(info.language);
@@ -610,20 +649,21 @@ class SessionManager extends EventEmitter {
   }
 
   notifyStatsUpdate(sessionId) {
-    const stats = this.getSessionStats(sessionId);
-    this.broadcastToSession(sessionId, {
+    const actualId = this.getCanonicalId(sessionId);
+    const stats = this.getSessionStats(actualId);
+    this.broadcastToSession(actualId, {
       type: 'STATS_UPDATE',
       stats
     });
-    this.broadcastToSession(sessionId, {
+    this.broadcastToSession(actualId, {
       type: 'SESSION_STATS',
       stats
     });
 
     // Notify language gates synchronization
     this.emit('languages_updated', {
-      sessionId,
-      languages: this.getRequiredLanguages(sessionId)
+      sessionId: actualId,
+      languages: this.getRequiredLanguages(actualId)
     });
   }
 
@@ -642,7 +682,8 @@ class SessionManager extends EventEmitter {
     seq = 0,
     timestamp = new Date().toISOString()
   }) {
-    const subs = this.subscribers.get(sessionId);
+    const actualId = this.getCanonicalId(sessionId);
+    const subs = this.subscribers.get(actualId);
     if (!subs) return;
 
     for (const sub of subs) {
@@ -702,7 +743,8 @@ class SessionManager extends EventEmitter {
    * Broadcasts a payload to all or specific roles in the session
    */
   broadcastToSession(sessionId, payload, roleFilter = null) {
-    const subs = this.subscribers.get(sessionId);
+    const actualId = this.getCanonicalId(sessionId);
+    const subs = this.subscribers.get(actualId);
     if (!subs) return;
 
     const message = JSON.stringify(payload);
@@ -724,7 +766,8 @@ class SessionManager extends EventEmitter {
     audioByLanguage = {},
     timestamp = new Date().toISOString()
   }) {
-    const session = this.getSession(sessionId);
+    const actualId = this.getCanonicalId(sessionId);
+    const session = this.getSession(actualId);
     if (session) {
       session.transcripts.push({
         arabic: arabicText,
@@ -741,7 +784,7 @@ class SessionManager extends EventEmitter {
       }
     }
 
-    const subs = this.subscribers.get(sessionId);
+    const subs = this.subscribers.get(actualId);
     if (!subs) return;
 
     for (const sub of subs) {

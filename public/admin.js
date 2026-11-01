@@ -847,8 +847,9 @@ async function startMicrophone() {
       micAudioProcessor.connect(muteGain);
       muteGain.connect(audioContext.destination);
 
+      let clientSilenceFrames = 0;
       micAudioProcessor.onaudioprocess = (e) => {
-        if (sessionStatus !== 'active' || !currentSessionId) return;
+        if (sessionStatus !== 'active' || !currentSessionId || !micActive) return;
         if (!ws || ws.readyState !== WebSocket.OPEN) {
           if (!ws || ws.readyState === WebSocket.CLOSED) {
             connectWebSocket(currentSessionId);
@@ -856,6 +857,23 @@ async function startMicrophone() {
           return;
         }
         const inputData = e.inputBuffer.getChannelData(0);
+
+        // Fast browser-side RMS voice check: if room is dead silent (< 0.003) for > 4 seconds, suppress frame spam
+        let sum = 0;
+        for (let i = 0; i < inputData.length; i++) {
+          sum += inputData[i] * inputData[i];
+        }
+        const rms = Math.sqrt(sum / inputData.length);
+        if (rms < 0.003) {
+          clientSilenceFrames++;
+          if (clientSilenceFrames > 32) {
+            // Suppress streaming empty silence to save bandwidth and prevent idle charges
+            return;
+          }
+        } else {
+          clientSilenceFrames = 0;
+        }
+
         const inputSampleRate = audioContext.sampleRate;
         const pcm16 = downsampleTo16kPCM(inputData, inputSampleRate);
         if (pcm16 && pcm16.byteLength > 0) {
@@ -1012,6 +1030,22 @@ let micAudioProcessor = null;
 
 function stopMicrophone() {
   micActive = false;
+
+  // Immediately notify server that mic is off so Soniox gates shut down in 0ms ($0 cost)
+  if (currentSessionId) {
+    if (ws && ws.readyState === WebSocket.OPEN) {
+      try {
+        ws.send(JSON.stringify({
+          type: 'MIC_OFF',
+          sessionId: currentSessionId
+        }));
+      } catch (_) {}
+    }
+    try {
+      fetch(`/api/session/${encodeURIComponent(currentSessionId)}/mic-off`, { method: 'POST' }).catch(() => {});
+    } catch (_) {}
+  }
+
   if (micAudioProcessor) {
     try { micAudioProcessor.disconnect(); } catch (_) {}
     micAudioProcessor = null;

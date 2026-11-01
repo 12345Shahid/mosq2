@@ -354,13 +354,18 @@ class TranslationService {
     }
 
     // Check predefined sermon dictionary with Arabic orthography normalization (0ms canonical match)
-    const normalizedInput = normalizeArabic(cleanText);
-    for (const { normKey, transMap } of NORMALIZED_DICTIONARY_ENTRIES) {
-      if (normalizedInput.includes(normKey) || normKey.includes(normalizedInput)) {
-        if (transMap[targetLang]) {
-          const canonical = transMap[targetLang];
-          this.cache.set(cacheKey, canonical);
-          return canonical;
+    // Guard: Only match against Arabic dictionary if input actually contains Arabic script!
+    if (hasArabicScript(cleanText)) {
+      const normalizedInput = normalizeArabic(cleanText);
+      if (normalizedInput && normalizedInput.length >= 3) {
+        for (const { normKey, transMap } of NORMALIZED_DICTIONARY_ENTRIES) {
+          if (normKey && (normalizedInput.includes(normKey) || (normalizedInput.length >= 6 && normKey.includes(normalizedInput)))) {
+            if (transMap[targetLang]) {
+              const canonical = transMap[targetLang];
+              this.cache.set(cacheKey, canonical);
+              return canonical;
+            }
+          }
         }
       }
     }

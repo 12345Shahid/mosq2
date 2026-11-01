@@ -8,17 +8,17 @@
     // ES3-safe TV runtime error logger: ensures any script error is visible on TV screen
     window.onerror = function (msg, src, line, col) {
       var el = document.getElementById('boot-err');
+      var content = document.getElementById('boot-err-content') || el;
       if (el) {
         el.style.display = 'block';
-        el.innerHTML += (msg || 'Error') + ' (' + (line || 0) + ':' + (col || 0) + ')\n';
+        content.innerHTML += (msg || 'Error') + ' (' + (line || 0) + ':' + (col || 0) + ')\n';
       }
       return false;
     };
   </script>
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-  <link rel="stylesheet" media="print" onload="this.media='all'" href="https://fonts.googleapis.com/css2?family=Amiri:ital,wght@0,400;0,700;1,400&family=Plus+Jakarta+Sans:wght@400;500;600;700;800&display=swap">
-  <noscript><link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Amiri:ital,wght@0,400;0,700;1,400&family=Plus+Jakarta+Sans:wght@400;500;600;700;800&display=swap"></noscript>
+  <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Amiri:ital,wght@0,400;0,700;1,400&family=Plus+Jakarta+Sans:wght@400;500;600;700;800&display=swap">
   <style>
     *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
     :root {
@@ -293,6 +293,7 @@
 
     /* ─── PROPORTIONAL TYPOGRAPHY (Dynamically Scaled & Balanced) ─── */
     .para-item {
+      margin-bottom: 0.75rem;
       transition: all 0.5s cubic-bezier(0.16, 1, 0.3, 1);
       color: #ffffff;
       text-shadow: 0 0 25px rgba(255, 255, 255, 0.22);
@@ -300,7 +301,7 @@
 
     /* Arabic Column Typography */
     #arabic-col .para-item {
-      font-family: 'Amiri', serif;
+      font-family: 'Amiri', 'Traditional Arabic', 'Scheherazade', 'Arabic Typesetting', serif;
       line-height: 1.6;
       text-align: right;
       color: #ffffff;
@@ -324,7 +325,7 @@
 
     /* Translation Column Typography */
     #trans-col .para-item {
-      font-family: 'Plus Jakarta Sans', sans-serif;
+      font-family: 'Plus Jakarta Sans', -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
       line-height: 1.45;
       text-align: left;
       color: #ffffff;
@@ -539,8 +540,17 @@
 <body style="background:#030711; color:#ffffff; height:100%; margin:0; padding:0; overflow:hidden;">
 
   <!-- Visual TV Boot Status & Error Display -->
-  <div id="boot-msg" style="position:fixed; left:0; right:0; top:45%; text-align:center; font-size:26px; font-weight:600; color:#94a3b8; font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif; pointer-events:none; z-index:9998;">Connecting to live Khutbah display…</div>
-  <div id="boot-err" style="display:none; position:fixed; left:20px; right:20px; bottom:20px; padding:12px; background:#7f1d1d; color:#fff; font:14px monospace; white-space:pre-wrap; z-index:9999; border-radius:8px;"></div>
+  <div id="boot-msg" style="position:fixed; left:0; right:0; top:42%; text-align:center; font-size:24px; font-weight:600; color:#94a3b8; font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif; pointer-events:none; z-index:9998; padding:0 20px;">
+    <div style="font-size:36px; margin-bottom:12px;">🕌</div>
+    <div id="boot-msg-text">Connecting to Live TV Display…</div>
+  </div>
+  <div id="boot-err" style="display:none; position:fixed; left:20px; right:20px; bottom:20px; padding:16px 20px; background:#7f1d1d; color:#fff; font:14px monospace; white-space:pre-wrap; z-index:9999; border-radius:8px; box-shadow:0 4px 20px rgba(0,0,0,0.7);">
+    <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:8px;">
+      <span style="font-weight:bold;">Display Notice</span>
+      <button onclick="window.location.reload()" style="background:#fff; color:#7f1d1d; border:none; padding:4px 12px; border-radius:4px; font-weight:bold; cursor:pointer;">Reload</button>
+    </div>
+    <div id="boot-err-content"></div>
+  </div>
 
   <!-- Top Bar (Clean & Distraction-Free Normal TV Screen) -->
   <header id="topbar">

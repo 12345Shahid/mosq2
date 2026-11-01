@@ -1,0 +1,554 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Mishkah AI — Codebase Assistant</title>
+  <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
+  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/github-dark.min.css">
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
+  <style>
+    :root {
+      --bg-dark: #0b0f19;
+      --bg-sidebar: #0f172a;
+      --bg-card: #1e293b;
+      --border: #334155;
+      --primary: #10b981;
+      --primary-hover: #059669;
+      --accent: #38bdf8;
+      --text: #f8fafc;
+      --text-muted: #94a3b8;
+    }
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+      background: var(--bg-dark);
+      color: var(--text);
+      display: flex;
+      height: 100vh;
+      overflow: hidden;
+    }
+
+    /* Sidebar */
+    .sidebar {
+      width: 280px;
+      background: var(--bg-sidebar);
+      border-right: 1px solid var(--border);
+      display: flex;
+      flex-direction: column;
+      flex-shrink: 0;
+    }
+    .sidebar-header {
+      padding: 16px;
+      border-bottom: 1px solid var(--border);
+      display: flex;
+      align-items: center;
+      gap: 10px;
+    }
+    .brand-icon {
+      width: 32px;
+      height: 32px;
+      background: linear-gradient(135deg, #10b981, #0284c7);
+      border-radius: 8px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      font-weight: bold;
+      color: white;
+    }
+    .brand-title { font-size: 15px; font-weight: 700; }
+    .brand-subtitle { font-size: 11px; color: var(--text-muted); }
+    .new-btn {
+      margin: 12px 16px;
+      padding: 10px 14px;
+      background: var(--primary);
+      color: white;
+      border: none;
+      border-radius: 8px;
+      font-weight: 600;
+      font-size: 13px;
+      cursor: pointer;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      gap: 6px;
+      transition: background 0.15s ease;
+    }
+    .new-btn:hover { background: var(--primary-hover); }
+    .session-list {
+      flex: 1;
+      overflow-y: auto;
+      padding: 0 10px 10px;
+    }
+    .session-item {
+      padding: 10px 12px;
+      border-radius: 6px;
+      cursor: pointer;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      margin-bottom: 4px;
+      font-size: 13px;
+      transition: background 0.1s ease;
+      color: var(--text-muted);
+    }
+    .session-item:hover { background: var(--bg-card); color: var(--text); }
+    .session-item.active { background: var(--bg-card); color: var(--primary); font-weight: 600; }
+    .session-item .title { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 190px; }
+    .session-item .del-btn { opacity: 0; color: #ef4444; border: none; background: none; cursor: pointer; padding: 2px 4px; border-radius: 4px; font-size: 14px; }
+    .session-item:hover .del-btn { opacity: 1; }
+
+    /* Main chat layout */
+    .main {
+      flex: 1;
+      display: flex;
+      flex-direction: column;
+      height: 100vh;
+      overflow: hidden;
+      position: relative;
+    }
+    .top-bar {
+      padding: 12px 20px;
+      background: var(--bg-sidebar);
+      border-bottom: 1px solid var(--border);
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 16px;
+    }
+    .session-heading { font-size: 15px; font-weight: 600; }
+    .top-controls { display: flex; align-items: center; gap: 12px; }
+    select.model-select {
+      background: var(--bg-card);
+      color: var(--text);
+      border: 1px solid var(--border);
+      padding: 6px 12px;
+      border-radius: 6px;
+      font-size: 13px;
+      outline: none;
+    }
+    .drawer-btn {
+      background: transparent;
+      border: 1px solid var(--border);
+      color: var(--text-muted);
+      padding: 6px 12px;
+      border-radius: 6px;
+      cursor: pointer;
+      font-size: 13px;
+    }
+    .drawer-btn:hover { background: var(--bg-card); color: var(--text); }
+
+    /* Messages container */
+    .chat-container {
+      flex: 1;
+      overflow-y: auto;
+      padding: 24px 20%;
+      display: flex;
+      flex-direction: column;
+      gap: 18px;
+    }
+    .message-row { display: flex; flex-direction: column; gap: 6px; }
+    .message-row.user { align-items: flex-end; }
+    .message-row.assistant { align-items: flex-start; }
+    .message-bubble {
+      max-width: 85%;
+      padding: 14px 18px;
+      border-radius: 12px;
+      line-height: 1.6;
+      font-size: 14px;
+      word-break: break-word;
+    }
+    .user .message-bubble { background: #0284c7; color: white; border-bottom-right-radius: 2px; }
+    .assistant .message-bubble { background: var(--bg-card); border: 1px solid var(--border); border-bottom-left-radius: 2px; }
+    .message-bubble pre { background: #030712; padding: 12px; border-radius: 8px; overflow-x: auto; margin: 8px 0; }
+    .message-bubble code { font-family: ui-monospace, Menlo, Monaco, Consolas, monospace; font-size: 12.5px; }
+
+    .tool-badge {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      background: rgba(16, 185, 129, 0.15);
+      border: 1px solid rgba(16, 185, 129, 0.3);
+      color: #34d399;
+      padding: 4px 10px;
+      border-radius: 6px;
+      font-size: 12px;
+      margin-bottom: 6px;
+      font-family: ui-monospace, monospace;
+    }
+
+    /* Input area */
+    .input-section {
+      padding: 16px 20%;
+      background: var(--bg-dark);
+      border-top: 1px solid var(--border);
+      display: flex;
+      flex-direction: column;
+      gap: 10px;
+    }
+    .chips { display: flex; gap: 8px; flex-wrap: wrap; }
+    .chip {
+      background: var(--bg-sidebar);
+      border: 1px solid var(--border);
+      color: var(--text-muted);
+      padding: 4px 10px;
+      border-radius: 14px;
+      font-size: 12px;
+      cursor: pointer;
+      transition: all 0.15s ease;
+    }
+    .chip:hover { border-color: var(--primary); color: var(--text); background: var(--bg-card); }
+    .input-box {
+      display: flex;
+      gap: 10px;
+      background: var(--bg-sidebar);
+      border: 1px solid var(--border);
+      border-radius: 10px;
+      padding: 8px 12px;
+      align-items: flex-end;
+    }
+    .input-box:focus-within { border-color: var(--primary); }
+    textarea.chat-input {
+      flex: 1;
+      background: transparent;
+      border: none;
+      color: var(--text);
+      font-size: 14px;
+      resize: none;
+      outline: none;
+      max-height: 140px;
+      min-height: 24px;
+      line-height: 1.4;
+      font-family: inherit;
+    }
+    .send-btn {
+      background: var(--primary);
+      border: none;
+      color: white;
+      padding: 8px 16px;
+      border-radius: 6px;
+      font-weight: 600;
+      cursor: pointer;
+      font-size: 13px;
+    }
+    .send-btn:disabled { opacity: 0.5; cursor: not-allowed; }
+
+    /* Code Viewer Drawer */
+    .drawer {
+      width: 480px;
+      background: var(--bg-sidebar);
+      border-left: 1px solid var(--border);
+      display: flex;
+      flex-direction: column;
+      height: 100vh;
+      flex-shrink: 0;
+      transition: margin-right 0.2s ease;
+    }
+    .drawer.closed { margin-right: -480px; }
+    .drawer-header {
+      padding: 12px 16px;
+      border-bottom: 1px solid var(--border);
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+    }
+    .drawer-content { flex: 1; overflow-y: auto; padding: 12px; font-family: ui-monospace, monospace; font-size: 12px; }
+    .file-item { padding: 4px 8px; border-radius: 4px; cursor: pointer; color: var(--text-muted); }
+    .file-item:hover { background: var(--bg-card); color: var(--text); }
+    .file-viewer { background: #030712; padding: 12px; border-radius: 6px; overflow-x: auto; white-space: pre; line-height: 1.5; color: #cbd5e1; }
+  </style>
+</head>
+<body>
+
+  <!-- Left Sidebar -->
+  <aside class="sidebar">
+    <div class="sidebar-header">
+      <div class="brand-icon">M</div>
+      <div>
+        <div class="brand-title">Mishkah AI</div>
+        <div class="brand-subtitle">Codebase Chatbot</div>
+      </div>
+    </div>
+    <button class="new-btn" id="newChatBtn">
+      <span>+</span> New Codebase Session
+    </button>
+    <div class="session-list" id="sessionList"></div>
+  </aside>
+
+  <!-- Main Chat -->
+  <main class="main">
+    <header class="top-bar">
+      <div class="session-heading" id="sessionTitle">New Codebase Chat</div>
+      <div class="top-controls">
+        <select class="model-select" id="modelSelect">
+          <option value="anthropic/claude-opus-5.5">Claude Opus 5.5</option>
+          <option value="meta/llama-3.3-70b-instruct">Llama 3.3 70B</option>
+          <option value="deepseek-ai/deepseek-r1">DeepSeek R1</option>
+        </select>
+        <button class="drawer-btn" id="toggleDrawerBtn">📁 Code Explorer</button>
+      </div>
+    </header>
+
+    <div class="chat-container" id="chatContainer"></div>
+
+    <div class="input-section">
+      <div class="chips">
+        <span class="chip" onclick="quickPrompt('Audit display.js lines 500 to the end')">Audit display.js (500–1242)</span>
+        <span class="chip" onclick="quickPrompt('How is Somali translation routed without Soniox 400 error?')">Somali Translation Engine</span>
+        <span class="chip" onclick="quickPrompt('Show how phone language isolation works in sessionManager.js')">Phone Isolation Logic</span>
+        <span class="chip" onclick="quickPrompt('Inspect join.js earbud keep-alive audio oscillator')">Earbud Keep-Alive</span>
+      </div>
+      <div class="input-box">
+        <textarea class="chat-input" id="chatInput" placeholder="Ask Claude Opus 5.5 anything about the codebase (press Enter to send)..." rows="1"></textarea>
+        <button class="send-btn" id="sendBtn">Send</button>
+      </div>
+    </div>
+  </main>
+
+  <!-- Right Drawer (Code Viewer) -->
+  <aside class="drawer closed" id="codeDrawer">
+    <div class="drawer-header">
+      <div style="font-weight:600; font-size:13px;" id="drawerTitle">Codebase Explorer</div>
+      <button class="drawer-btn" style="padding:2px 8px;" onclick="closeDrawer()">✕</button>
+    </div>
+    <div class="drawer-content" id="drawerBody">
+      <div style="color:var(--text-muted); margin-bottom:8px;">Quick inspect files in full:</div>
+      <div class="file-item" onclick="viewFile('public/display.js')">📄 public/display.js (1,242 lines)</div>
+      <div class="file-item" onclick="viewFile('public/join.js')">📄 public/join.js (899 lines)</div>
+      <div class="file-item" onclick="viewFile('public/admin.js')">📄 public/admin.js (500+ lines)</div>
+      <div class="file-item" onclick="viewFile('server/index.js')">📄 server/index.js</div>
+      <div class="file-item" onclick="viewFile('server/sessionManager.js')">📄 server/sessionManager.js (806 lines)</div>
+      <div class="file-item" onclick="viewFile('server/services/sonioxService.js')">📄 server/services/sonioxService.js</div>
+      <div class="file-item" onclick="viewFile('server/services/translationService.js')">📄 server/services/translationService.js</div>
+      <hr style="border:none; border-top:1px solid var(--border); margin:12px 0;">
+      <div id="fileViewerContainer"></div>
+    </div>
+  </aside>
+
+  <script>
+    let currentSessionId = null;
+    let isGenerating = false;
+
+    async function loadSessions() {
+      const res = await fetch('/api/sessions');
+      const sessions = await res.json();
+      const listEl = document.getElementById('sessionList');
+      listEl.innerHTML = '';
+
+      sessions.forEach(s => {
+        const item = document.createElement('div');
+        item.className = `session-item ${s.id === currentSessionId ? 'active' : ''}`;
+        item.innerHTML = `
+          <div class="title" title="${s.title}">${s.title}</div>
+          <button class="del-btn" title="Delete session" onclick="deleteSession(event, '${s.id}')">✕</button>
+        `;
+        item.onclick = (e) => {
+          if (e.target.classList.contains('del-btn')) return;
+          selectSession(s.id);
+        };
+        listEl.appendChild(item);
+      });
+
+      if (!currentSessionId && sessions.length > 0) {
+        selectSession(sessions[0].id);
+      }
+    }
+
+    async function selectSession(id) {
+      currentSessionId = id;
+      const res = await fetch(`/api/sessions/${id}`);
+      if (!res.ok) return;
+      const session = await res.json();
+      document.getElementById('sessionTitle').textContent = session.title || 'Codebase Chat';
+      document.getElementById('modelSelect').value = session.model || 'anthropic/claude-opus-5.5';
+
+      renderMessages(session.messages || []);
+      loadSessions();
+    }
+
+    function renderMessages(messages) {
+      const container = document.getElementById('chatContainer');
+      container.innerHTML = '';
+
+      messages.forEach(m => {
+        appendMessageUI(m.role, m.content);
+      });
+      container.scrollTop = container.scrollHeight;
+    }
+
+    function appendMessageUI(role, content) {
+      const container = document.getElementById('chatContainer');
+      const row = document.createElement('div');
+      row.className = `message-row ${role}`;
+      const bubble = document.createElement('div');
+      bubble.className = 'message-bubble';
+
+      if (role === 'assistant') {
+        bubble.innerHTML = marked.parse(content || '');
+      } else {
+        bubble.textContent = content;
+      }
+
+      row.appendChild(bubble);
+      container.appendChild(row);
+      container.scrollTop = container.scrollHeight;
+      return bubble;
+    }
+
+    async function createNewChat() {
+      const model = document.getElementById('modelSelect').value;
+      const res = await fetch('/api/sessions', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ model })
+      });
+      const session = await res.json();
+      currentSessionId = session.id;
+      document.getElementById('sessionTitle').textContent = session.title;
+      renderMessages([]);
+      loadSessions();
+    }
+
+    async function deleteSession(e, id) {
+      e.stopPropagation();
+      if (!confirm('Delete this conversation session?')) return;
+      await fetch(`/api/sessions/${id}`, { method: 'DELETE' });
+      if (currentSessionId === id) {
+        currentSessionId = null;
+        renderMessages([]);
+      }
+      loadSessions();
+    }
+
+    async function sendMessage() {
+      const input = document.getElementById('chatInput');
+      const text = input.value.trim();
+      if (!text || isGenerating) return;
+
+      input.value = '';
+      input.style.height = '24px';
+      isGenerating = true;
+      document.getElementById('sendBtn').disabled = true;
+
+      // Add user message to UI
+      appendMessageUI('user', text);
+
+      // Create assistant bubble placeholder
+      const assistantBubble = appendMessageUI('assistant', '');
+      let fullAssistantText = '';
+
+      const model = document.getElementById('modelSelect').value;
+
+      try {
+        const res = await fetch('/api/chat', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            sessionId: currentSessionId,
+            message: text,
+            model
+          })
+        });
+
+        const reader = res.body.getReader();
+        const decoder = new TextDecoder();
+
+        while (true) {
+          const { done, value } = await reader.read();
+          if (done) break;
+
+          const chunk = decoder.decode(value);
+          for (const block of chunk.split('\n\n')) {
+            if (!block.trim()) continue;
+            let event = '';
+            let data = '';
+            for (const line of block.split('\n')) {
+              if (line.startsWith('event: ')) event = line.slice(7).trim();
+              else if (line.startsWith('data: ')) data = line.slice(6);
+            }
+
+            if (event === 'session') {
+              const meta = JSON.parse(data);
+              currentSessionId = meta.sessionId;
+              document.getElementById('sessionTitle').textContent = meta.title;
+            } else if (event === 'tool') {
+              const tc = JSON.parse(data);
+              const toolInfo = tc.tool === 'preload'
+                ? `📖 Loaded complete file: ${tc.files.join(', ')}`
+                : `🔧 Tool: ${tc.tool}`;
+              const badge = document.createElement('div');
+              badge.className = 'tool-badge';
+              badge.textContent = toolInfo;
+              assistantBubble.parentNode.insertBefore(badge, assistantBubble);
+            } else if (event === 'token') {
+              const { token } = JSON.parse(data);
+              fullAssistantText += token;
+              assistantBubble.innerHTML = marked.parse(fullAssistantText);
+              document.getElementById('chatContainer').scrollTop = document.getElementById('chatContainer').scrollHeight;
+            } else if (event === 'done') {
+              loadSessions();
+            }
+          }
+        }
+      } catch (err) {
+        assistantBubble.textContent = `Error: ${err.message}`;
+      } finally {
+        isGenerating = false;
+        document.getElementById('sendBtn').disabled = false;
+        // Trigger highlightjs on all newly created code blocks
+        assistantBubble.querySelectorAll('pre code').forEach((el) => {
+          hljs.highlightElement(el);
+        });
+      }
+    }
+
+    function quickPrompt(text) {
+      document.getElementById('chatInput').value = text;
+      sendMessage();
+    }
+
+    async function viewFile(filePath) {
+      const container = document.getElementById('fileViewerContainer');
+      container.innerHTML = '<div style="color:var(--text-muted)">Loading complete file...</div>';
+      const res = await fetch(`/api/file-content?path=${encodeURIComponent(filePath)}`);
+      const data = await res.json();
+      if (data.error) {
+        container.innerHTML = `<div style="color:#ef4444">${data.error}</div>`;
+        return;
+      }
+      container.innerHTML = `
+        <div style="font-weight:600; color:var(--primary); margin-bottom:6px;">${data.filePath} (${data.totalLines} lines)</div>
+        <div class="file-viewer">${escapeHtml(data.content)}</div>
+      `;
+    }
+
+    function escapeHtml(str) {
+      return str.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+    }
+
+    function closeDrawer() {
+      document.getElementById('codeDrawer').classList.add('closed');
+    }
+
+    document.getElementById('toggleDrawerBtn').onclick = () => {
+      document.getElementById('codeDrawer').classList.toggle('closed');
+    };
+    document.getElementById('newChatBtn').onclick = createNewChat;
+    document.getElementById('sendBtn').onclick = sendMessage;
+
+    const chatInput = document.getElementById('chatInput');
+    chatInput.addEventListener('keydown', (e) => {
+      if (e.key === 'Enter' && !e.shiftKey) {
+        e.preventDefault();
+        sendMessage();
+      }
+    });
+    chatInput.addEventListener('input', () => {
+      chatInput.style.height = 'auto';
+      chatInput.style.height = Math.min(140, chatInput.scrollHeight) + 'px';
+    });
+
+    loadSessions();
+  </script>
+</body>
+</html>

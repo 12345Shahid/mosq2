@@ -48,7 +48,24 @@ const KEEPALIVE_MS = 5000;
 const MAX_QUEUE_BYTES = 16000 * 2 * 15; // 15 seconds of 16kHz 16-bit PCM (480,000 bytes)
 const SENTENCE_END = /[.!?؟。！？۔]\s*/g; // Sentence punctuation (incl. Arabic ؟, Urdu ۔, Chinese 。！？)
 const MAX_SEGMENT_CHARS = 220; // Force commit during long continuous speech without punctuation
-const MAX_CONCURRENT_GATES = parseInt(process.env.SONIOX_MAX_CONCURRENT_STREAMS || '1', 10);
+const MAX_CONCURRENT_GATES = parseInt(process.env.SONIOX_MAX_CONCURRENT_STREAMS || '5', 10);
+const SILENCE_AUTO_CLOSE_MS = 12000; // 12 seconds of silence -> close gate to stop Soniox billing ($0 idle cost)
+const SILENCE_RMS_THRESHOLD = parseInt(process.env.SONIOX_SILENCE_RMS_THRESHOLD || '150', 10); // 16-bit PCM RMS threshold for voice activity
+
+/**
+ * Calculates Root Mean Square (RMS) sound energy of 16-bit PCM mono audio.
+ * Ambient room silence is typically < 100-150. Human speech is 800 - 15,000+.
+ */
+function calculateRMS(pcmBuffer) {
+  if (!pcmBuffer || pcmBuffer.length < 2) return 0;
+  let sum = 0;
+  const samples = Math.floor(pcmBuffer.length / 2);
+  for (let i = 0; i < samples * 2; i += 2) {
+    const sample = pcmBuffer.readInt16LE(i);
+    sum += sample * sample;
+  }
+  return Math.sqrt(sum / samples);
+}
 
 // Per-language glossaries (carefully phrased to prevent unwanted replacements)
 const GLOSSARY = {
@@ -94,12 +111,28 @@ class SonioxGateManager extends EventEmitter {
     this.sessionSourceLanguages = new Map();
     this.isRateLimited = false;
     this.rateLimitedUntil = 0;
+    this.sessionValidator = null; // Optional validator callback (sessionId) => boolean
     this.isOperational = this.validateApiKey(this.apiKey);
 
     if (this.isOperational) {
       console.log('[Soniox] Dynamic Language Gates initialized with active API key.');
     } else {
       console.log('[Soniox] No valid SONIOX_API_KEY provided. Running in fallback mode.');
+    }
+  }
+
+  setSessionValidator(validatorFn) {
+    if (typeof validatorFn === 'function') {
+      this.sessionValidator = validatorFn;
+    }
+  }
+
+  isSessionActive(sessionId) {
+    if (!this.sessionValidator || !sessionId) return true;
+    try {
+      return Boolean(this.sessionValidator(sessionId));
+    } catch (_) {
+      return true;
     }
   }
 
@@ -213,6 +246,18 @@ class SonioxGateManager extends EventEmitter {
     const sid = (maybeLangs !== undefined && typeof sessionIdOrLangs === 'string')
       ? sessionIdOrLangs
       : 'default';
+
+    // STRICT SESSION ACTIVE GATE: If session is not currently active, close all gates and refuse new ones
+    if (!this.isSessionActive(sid)) {
+      for (const [gateKey, gate] of this.activeGates.entries()) {
+        if (gate.sessionId === sid) {
+          console.log(`[Soniox] Session "${sid}" is not active — closing gate "${gateKey}" ($0 cost).`);
+          this.closeGate(gate.sessionId, gate.lang);
+        }
+      }
+      return;
+    }
+
     const rawLangs = maybeLangs !== undefined ? maybeLangs : sessionIdOrLangs;
     const reqSet = new Set(Array.from(rawLangs || []).filter(l => l && typeof l === 'string'));
 
@@ -256,6 +301,12 @@ class SonioxGateManager extends EventEmitter {
     const sid = maybeLang ? sessionIdOrLang : 'default';
     const langCode = maybeLang || sessionIdOrLang;
     if (!langCode) return null;
+
+    // STRICT SESSION ACTIVE GATE: Never open a Soniox stream for a non-active session
+    if (!this.isSessionActive(sid)) {
+      console.log(`[Soniox Gate] Session "${sid}" is not active — gate will NOT be opened for "${langCode}" ($0 cost).`);
+      return null;
+    }
 
     // If currently cooling off from 429, do not open new sockets
     if (this.isRateLimited) {
@@ -365,13 +416,20 @@ class SonioxGateManager extends EventEmitter {
           gate.queuedBytes = 0;
         }
 
-        // Keepalive timer: ping every 5s if silence > 5s to prevent Soniox idle timeout
+        // Keepalive timer: ping every 5s during brief speech pauses (< 12s).
+        // If silence exceeds 12s, close gate immediately to stop billing ($0 idle cost).
         clearInterval(gate.keepaliveTimer);
         gate.keepaliveTimer = setInterval(() => {
-          if (ws.readyState === WebSocket.OPEN && Date.now() - gate.lastAudioAt > KEEPALIVE_MS) {
-            try {
-              ws.send(JSON.stringify({ type: 'keepalive' }));
-            } catch (_) {}
+          if (ws.readyState === WebSocket.OPEN) {
+            const silenceMs = Date.now() - gate.lastAudioAt;
+            if (silenceMs >= SILENCE_AUTO_CLOSE_MS) {
+              console.log(`[Soniox Gate ${gate.gateKey}] Silence for ${Math.round(silenceMs/1000)}s — closing gate to stop billing ($0 cost).`);
+              this.closeGate(gate.sessionId, gate.lang);
+            } else if (silenceMs >= KEEPALIVE_MS) {
+              try {
+                ws.send(JSON.stringify({ type: 'keepalive' }));
+              } catch (_) {}
+            }
           }
         }, KEEPALIVE_MS);
       });
@@ -392,6 +450,7 @@ class SonioxGateManager extends EventEmitter {
 
         if (gate.closing || !this.isOperational) {
           gate.status = 'closed';
+          this.activeGates.delete(gate.gateKey);
           return;
         }
 
@@ -403,9 +462,20 @@ class SonioxGateManager extends EventEmitter {
           return;
         }
 
+        // STRICT COST PROTECTION: Only auto-reconnect if audio was actively being streamed (within last 5 seconds)
+        // If the socket closed during silence or Khutbah pause, stay closed at $0 cost!
+        const wasRecentlyActive = (Date.now() - gate.lastAudioAt) < 5000;
+        if (!wasRecentlyActive) {
+          console.log(`[Soniox Gate ${gate.gateKey}] Socket closed during silence — staying closed until active speech resumes ($0 cost).`);
+          gate.status = 'closed';
+          gate.closing = true;
+          this.activeGates.delete(gate.gateKey);
+          return;
+        }
+
         gate.status = 'reconnecting';
         const delay = Math.min(1000 * Math.pow(2, gate.reconnectAttempts++), 30000);
-        console.warn(`[Soniox Gate ${gate.gateKey}] WS Closed (${code}: ${reason || 'Blip'}); auto-reconnect in ${delay}ms...`);
+        console.warn(`[Soniox Gate ${gate.gateKey}] WS Closed during active speech (${code}: ${reason || 'Blip'}); auto-reconnect in ${delay}ms...`);
 
         gate.reconnectTimer = setTimeout(() => {
           gate.reconnectTimer = null;
@@ -670,12 +740,12 @@ class SonioxGateManager extends EventEmitter {
     if (this.sessionInactivityTimers.has(sid)) {
       clearTimeout(this.sessionInactivityTimers.get(sid));
     }
-    // 45-second inactivity timeout so gates close promptly when session audio stops, preventing concurrency lockouts
+    // 12-second inactivity timeout: close all session gates promptly when speech stops ($0 idle cost)
     const timer = setTimeout(() => {
       this.sessionInactivityTimers.delete(sid);
-      console.log(`[Soniox] Inactivity timeout: 45 seconds of silence for session "${sid}". Closing gates.`);
+      console.log(`[Soniox] Inactivity timeout: 12 seconds of silence for session "${sid}". Closing gates to stop billing ($0 cost).`);
       this.closeSessionGates(sid);
-    }, 45000);
+    }, SILENCE_AUTO_CLOSE_MS);
     this.sessionInactivityTimers.set(sid, timer);
   }
 
@@ -700,20 +770,37 @@ class SonioxGateManager extends EventEmitter {
 
     const sid = sessionId;
 
-    // Touch session inactivity timer
-    this.touchSessionAudio(sid);
+    // STRICT SESSION ACTIVE GATE: Drop audio and close any lingering gates if session is not active
+    if (!this.isSessionActive(sid)) {
+      this.closeSessionGates(sid);
+      return;
+    }
 
-    // If no gate exists yet for this session (e.g. after pause or fresh start), request full resync
+    // Voice Activity Detection (VAD) via RMS sound energy calculation
+    const rms = calculateRMS(pcmBuffer);
+    const isVoice = (rms >= SILENCE_RMS_THRESHOLD);
+
+    if (isVoice) {
+      // Touch session inactivity timer ONLY on real speech ($0 idle cost during silence)
+      this.touchSessionAudio(sid);
+    }
+
+    // If no gate exists yet for this session (e.g. after pause or fresh start), request full resync ONLY on real speech
     let sessionHasGates = false;
     for (const [_, gate] of this.activeGates.entries()) {
-      if (gate.sessionId === sid) {
+      if (gate.sessionId === sid && (gate.status === 'open' || gate.status === 'connecting')) {
         sessionHasGates = true;
         break;
       }
     }
     if (!sessionHasGates) {
-      this.emit('session_needs_sync', sid);
-      this.ensureGate(sid, 'en');
+      if (isVoice) {
+        this.emit('session_needs_sync', sid);
+        this.ensureGate(sid, 'en');
+      } else {
+        // Do not open new gates for pure silence
+        return;
+      }
     }
 
     for (const [_, gate] of this.activeGates.entries()) {
@@ -722,7 +809,17 @@ class SonioxGateManager extends EventEmitter {
         continue;
       }
 
-      gate.lastAudioAt = Date.now();
+      if (isVoice) {
+        gate.lastAudioAt = Date.now();
+        gate.lastVoiceAt = Date.now();
+      }
+
+      const silenceDuration = Date.now() - (gate.lastVoiceAt || gate.lastAudioAt);
+
+      // If prolonged silence (> 3 seconds), suppress sending continuous empty silence frames to Soniox
+      if (!isVoice && silenceDuration > 3000) {
+        continue;
+      }
 
       if (gate.status === 'open' && gate.ws && gate.ws.readyState === WebSocket.OPEN) {
         if (gate.ws.bufferedAmount > 512 * 1024) {
@@ -733,7 +830,7 @@ class SonioxGateManager extends EventEmitter {
         } catch (e) {
           console.warn(`[Soniox Gate ${gate.gateKey}] Send error:`, e.message);
         }
-      } else if (gate.queuedBytes < MAX_QUEUE_BYTES) {
+      } else if (gate.queuedBytes < MAX_QUEUE_BYTES && isVoice) {
         gate.audioQueue.push(pcmBuffer);
         gate.queuedBytes += pcmBuffer.length;
       }
@@ -742,6 +839,16 @@ class SonioxGateManager extends EventEmitter {
 
   pushAudio(pcmBuffer, sessionId = null) {
     this.broadcastAudio(pcmBuffer, sessionId);
+  }
+
+  /**
+   * Called immediately when microphone is stopped/disabled.
+   * Shuts down all active Soniox gates for the session with 0ms delay ($0 cost).
+   */
+  onMicrophoneOff(sessionId) {
+    const sid = sessionId || 'default';
+    console.log(`[Soniox] Microphone turned OFF for session "${sid}" — immediately closing all gates ($0 cost).`);
+    this.closeSessionGates(sid);
   }
 
   /**
